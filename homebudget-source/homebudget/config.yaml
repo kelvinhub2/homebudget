@@ -1,0 +1,161 @@
+# HomeBudget — Configuration
+# Edit accounts when adding new bank accounts or cards
+# DO NOT store passwords or API keys here — use environment variables
+
+app:
+  name: "HomeBudget"
+  subtitle: "Haushalt Muttenz"
+  timezone: "Europe/Zurich"
+  hotfolder_poll_seconds: 300   # 5 minutes
+
+# Account mapping
+# BLKB: IBAN extracted from filename (spaces stripped, uppercase)
+# Swisscard: CardId from CSV column 'CardId'
+# Add new accounts here — no code changes needed
+accounts:
+  # BLKB Manuel — IBAN
+  CH1600769056912992003:
+    name: "BLKB Manuel"
+    owner: manuel
+    bank: BLKB
+    currency: CHF
+
+  # BLKB Manuel — QR-IBAN (used in export filename)
+  CH3830769056912992003:
+    name: "BLKB Manuel"
+    owner: manuel
+    bank: BLKB
+    currency: CHF
+
+  # BLKB Joint (Manuel & Farnaz) — IBAN
+  CH5400769400202132001:
+    name: "BLKB Joint"
+    owner: joint
+    bank: BLKB
+    currency: CHF
+
+  # BLKB Joint — QR-IBAN (used in export filename)
+  CH7630769400202132001:
+    name: "BLKB Joint"
+    owner: joint
+    bank: BLKB
+    currency: CHF
+
+  # BLKB Manuel & Muriel (Tubhusweg 14) — IBAN
+  CH1800769401676282001:
+    name: "BLKB Muriel Joint"
+    owner: joint
+    bank: BLKB
+    currency: CHF
+
+  # BLKB Manuel & Muriel — QR-IBAN (used in export filename)
+  CH4030769401676282001:
+    name: "BLKB Muriel Joint"
+    owner: joint
+    bank: BLKB
+    currency: CHF
+
+  # BLKB Farnaz — Privatkonto
+  CH5700769016204903683:
+    name: "BLKB Farnaz Privat"
+    owner: farnaz
+    bank: BLKB
+    currency: CHF
+
+  # BLKB Farnaz — Sparkonto
+  CH2700769042227111198:
+    name: "BLKB Farnaz Sparkonto"
+    owner: farnaz
+    bank: BLKB
+    currency: CHF
+
+  # Credit Suisse Manuel — active until Nov 2025 (migrated to UBS)
+  CH9804835057772900001:
+    name: "CS Manuel Privat"
+    owner: manuel
+    bank: CS
+    currency: CHF
+
+  # UBS Manuel — Privatkonto (active from Nov 2025, replaces CS)
+  CH6800243243820096400:
+    name: "UBS Manuel Privat"
+    owner: manuel
+    bank: UBS
+    currency: CHF
+
+  # UBS Manuel — Privatkonto QR-IBAN variant (trailing B stripped)
+  CH680024324382009640:
+    name: "UBS Manuel Privat"
+    owner: manuel
+    bank: UBS
+    currency: CHF
+
+  # UBS Manuel — Platinum CC (card ending 6794)
+  "6794":
+    name: "UBS Platinum Manuel"
+    owner: manuel
+    bank: UBS
+    currency: CHF
+
+  # Viseca Visa Gold Farnaz — CardId from CSV (old format)
+  462723EC0S0U3536:
+    name: "Viseca Visa Gold Farnaz"
+    owner: farnaz
+    bank: Swisscard
+    currency: CHF
+
+  # Swisscard Visa — card ending 3020 (XLSX format)
+  "4059123020":
+    name: "Swisscard Visa Manuel"
+    owner: manuel
+    bank: Swisscard
+    currency: CHF
+
+  # Swisscard Amex — card ending 1297 (XLSX format)
+  "3776611297":
+    name: "Swisscard Amex Manuel"
+    owner: manuel
+    bank: Swisscard
+    currency: CHF
+
+# Internal transfer detection
+# Transactions matching these patterns are tagged is_internal=1
+# and excluded from expense reports
+internal_patterns:
+  - "INTERNAL_TRANSFER"
+  - "Dauerauftrag"
+  - "DA001000"
+  - "Your payment - Thank you"   # Swisscard CC settlement
+
+# Known internal recipients (TWINT P2P to own accounts)
+internal_recipients:
+  - "Schär Manuel"
+  - "Manuel Schaer"
+  - "Farnaz Sharifi"
+  - "Schär & Dr. Sharifi"
+
+# FX annual average rates (CHF per 1 unit of foreign currency)
+# Used for Amazon imports only — other sources include FX rate in file
+# Update current year rate when available (use January average until year-end)
+fx_rates:
+  EUR:
+    2021: 1.081
+    2022: 1.005
+    2023: 0.972
+    2024: 0.952
+    2025: 0.938
+    2026: 0.942   # Jan 2026 average — update at year-end
+  GBP:
+    2021: 1.257
+    2022: 1.175
+    2023: 1.113
+    2024: 1.133
+    2025: 1.119
+    2026: 1.112   # Jan 2026 average — update at year-end
+  USD:
+    2021: 0.914
+    2022: 0.955
+    2023: 0.898
+    2024: 0.881
+    2025: 0.899
+    2026: 0.890   # Jan 2026 average — update at year-end
