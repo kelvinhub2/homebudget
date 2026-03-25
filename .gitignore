@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.env
+homebudget/data/
+*.db
+homebudget-frontend/node_modules/
+homebudget-frontend/dist/
