@@ -27,19 +27,32 @@ _COUNTRY_LINE = re.compile(
 _POSTAL_LINE = re.compile(r'^\d{4,5}\s')  # postal code start
 
 
+_OWN_NAME_RE = re.compile(
+    r'MANUEL.*SCHA|SCHA.*MANUEL|FARNAZ|SHARIFI|TUBHUSWEG', re.IGNORECASE
+)
+
+
 def detect_tx_type(raw: str) -> str:
     """
     Returns a structural token describing the transaction type.
     """
     r = raw.upper()
-    # INTERNAL_TRANSFER: Dauerauftrag, own-account transfers
-    if re.search(r'DAUERAUFTRAG|DA001000|INTERNAL', r):
+    # INTERNAL_TRANSFER: specific own-account markers only
+    if re.search(r'DA001000|INTERNAL', r):
         return "INTERNAL_TRANSFER"
+    # Dauerauftrag = standing order — only INTERNAL if sent to/from own name
+    if re.search(r'DAUERAUFTRAG', r):
+        if _OWN_NAME_RE.search(r):
+            return "INTERNAL_TRANSFER"
     # CR-002: detect transfers via Mitteilung keyword
     if re.search(r'MITTEILUNG:\s*(TRANSFER|ÜBERTRAG|UMBUCHUNG|SAVINGS)', r):
         return "INTERNAL_TRANSFER"
-    # TWINT
-    if re.search(r'TWINT.{0,20}GELD (GESENDET|ERHALTEN)', r):
+    # Own-name incoming/outgoing payments = own account transfer
+    if re.search(r'ZAHLUNGSEINGANG|ZAHLUNGSAUFTRAG|GUTSCHRIFT', r):
+        if _OWN_NAME_RE.search(r):
+            return "INTERNAL_TRANSFER"
+    # TWINT P2P: "Geld gesendet/erhalten" anywhere — must come before TWINT_MERCHANT
+    if re.search(r'GELD (GESENDET|ERHALTEN)', r):
         return "TWINT_P2P"
     if re.search(r'\+41[0-9 ]{9,}', raw):
         return "TWINT_P2P"
@@ -73,6 +86,9 @@ NOISE_PATTERNS = [
     r'\b\d{2}:\d{2}\b',
     r'Zahlungsauftrag E-Banking\s*/',
     r'Zahlungsauftrag\s+QR-Rechnung\s*/',
+    r'Zahlungsauftrag\s+E-Banking',
+    r'Belastung:\s*Dauerauftrag\s*/',
+    r'\bDauerauftrag\b',
     r'TWINT-Zahlung\s*/',
     r'Rückerstattung TWINT-Zahlung\s*/',
     r'Zahlungseingang\s*/',
@@ -82,7 +98,10 @@ NOISE_PATTERNS = [
     r'Zahlungsauftrag eBill\s*/',
     r'Debitkarte (E-Commerce |)Zahlung (CHF|EUR)\s*',
     r'Debitkarte Zahlung Verkaufspunkt (CHF|EUR)\s*',
+    r'Belastung:\s*',
+    r'Gutschrift:\s*',
     r'Mitteilung:\s*',
+    r'Information:\s*',
     r'Info:\s*',
     r'Zahlbar durch:\s*',
     r'Geld (gesendet an|erhalten von)\s*',
@@ -107,13 +126,20 @@ NOISE_PATTERNS = [
     r'Sharifi[\s-]Yazdi\s+Farnaz',
     r'[\s-]?Sharifi[\s-]Yazdi',
     r'Farnaz\s+Sharifi',
+    r'\bSharifi\b',
     r'Schaer\s+Manuel',
     r'M\.\s+Sch[äa]r',
     r'Herr\s+M\.\s+Sch[äa]r',
     r'\bSch[äa]er?\b',
     r'\bFarnaz\b',
     r'Tubhusweg\s+\d+',
+    r'CH[\s-]\d{4,5}\s+\w+',          # CH-4132 Muttenz fragments
+    r'\bCH[\s-]\d{4,5}\b',            # standalone CH-4132
     r'4132\s+Muttenz',
+    r'Konto-Nr\.?\s*(?:IBAN:?\s*)?',
+    r'Transaktions-Nr\.?\s*[\w\-]+',
+    r'Kosten:\s*',
+    r'\bInland\b',
     r'DePuy\s+Synthes\s+(?:EMEA|GmbH|AG)?',
     r'Luzernstrasse\s+\d+',
     r'Hochstrasse\s+\d+',
@@ -146,6 +172,19 @@ def _is_address_line(line: str) -> bool:
     return False
 
 
+def _is_valid_merchant(name: str) -> bool:
+    """Return True if name is a meaningful merchant string (has letters, length >= 3)."""
+    if not name or len(name) < 3:
+        return False
+    if not re.search(r'[A-Za-zÄÖÜäöü]', name):
+        return False
+    # Reject noise-only words
+    if re.match(r'^(information|mitteilung|referenz|zahlbar|unknown|payments?|transfer|'
+                r'incoming|rb|da|info)\s*:?\s*$', name, re.IGNORECASE):
+        return False
+    return True
+
+
 def extract_merchant_blkb(raw: str, tx_type: str) -> str:
     """
     Extract merchant from BLKB multi-line booking text.
@@ -163,15 +202,21 @@ def extract_merchant_blkb(raw: str, tx_type: str) -> str:
 
     if tx_type == "TWINT_P2P":
         for i, line in enumerate(lines):
+            m = re.search(r'Geld (?:gesendet an|erhalten von)\s+(.+)', line, re.IGNORECASE)
+            if m:
+                # Name on same line as "Geld gesendet an"
+                name = strip_noise(m.group(1).strip())
+                if name and len(name) > 1:
+                    return name.title()
             if re.search(r'Geld (gesendet an|erhalten von)', line, re.IGNORECASE):
                 if i + 1 < len(lines):
                     name = strip_noise(lines[i + 1].strip())
-                    if name and len(name) > 1:
+                    if _is_valid_merchant(name):
                         return name.title()
         for line in lines[1:]:
             if re.match(r'^[A-ZÄÖÜ][a-zäöü]+ [A-ZÄÖÜ][a-zäöü]+', line):
                 name = strip_noise(line.strip())
-                if name and len(name) > 1:
+                if _is_valid_merchant(name):
                     return name.title()
 
     if tx_type in ("CARD", "CARD_FOREIGN"):
@@ -197,15 +242,21 @@ def extract_merchant_blkb(raw: str, tx_type: str) -> str:
             0
         )
         stop_keywords = re.compile(
-            r'^(info|zahlbar|scor|esr|abgabe|clearing)',
+            r'^(info|zahlbar|scor|esr|abgabe|clearing|information|mitteilung|referenz)',
             re.IGNORECASE
         )
-        # First pass: look for Mitteilung content (useful for tax/insurance)
+        # First pass: look for Mitteilung content (useful for tax/insurance payments)
+        # Skip if it looks like an invoice/reference number — the payee name will be on the next line
+        _ref_like = re.compile(
+            r'^(invoice|rechnung|inv|ref|nr|auftrag|order|bill|qr|da\d)[\s#.\-]*\d*$'
+            r'|\b\d{3,}\b',  # anything that's mainly a number
+            re.IGNORECASE
+        )
         for line in lines[ref_idx + 1:]:
             if re.match(r'^Mitteilung:', line, re.IGNORECASE):
                 content = re.sub(r'^Mitteilung:\s*', '', line, flags=re.IGNORECASE).strip()
                 content = strip_noise(content)
-                if len(content) > 4 and not re.match(r'^\d+$', content):
+                if len(content) > 4 and not re.match(r'^\d+$', content) and not _ref_like.search(content):
                     return content.title()
 
         # Second pass: first meaningful non-address line
@@ -232,7 +283,7 @@ def extract_merchant_blkb(raw: str, tx_type: str) -> str:
             cleaned = re.sub(r'\s+\d+\s+[A-Z][a-z]+\s*$', '', cleaned).strip()
             # Remove city repetition: "Fuengirola Fuengirola" → "Fuengirola"
             cleaned = re.sub(r'\b(\w{4,})\s+\1\b', r'\1', cleaned, flags=re.IGNORECASE)
-            if len(cleaned) > 2:
+            if _is_valid_merchant(cleaned):
                 return cleaned.title()
 
     # Fallback: strip noise from full text
@@ -242,9 +293,9 @@ def extract_merchant_blkb(raw: str, tx_type: str) -> str:
         '', cleaned, flags=re.IGNORECASE
     )
     cleaned = re.sub(r'\s+', ' ', cleaned).strip()
-    if cleaned:
+    if _is_valid_merchant(cleaned):
         return cleaned[:60].title()
-    return "Unknown"
+    return "Own Transfer" if tx_type == "INTERNAL_TRANSFER" else "Unknown"
 
 
 def extract_merchant_swisscard(merchant_name: str, details: str) -> str:

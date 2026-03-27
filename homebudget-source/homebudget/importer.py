@@ -11,11 +11,12 @@ from datetime import datetime
 
 import yaml
 
-from parsers.detect    import detect_source, SOURCE_BLKB, SOURCE_SWISSCARD, SOURCE_AMAZON, SOURCE_UBS
+from parsers.detect    import detect_source, SOURCE_BLKB, SOURCE_SWISSCARD, SOURCE_AMAZON, SOURCE_UBS, SOURCE_CS
 from parsers.blkb      import parse as parse_blkb
 from parsers.swisscard import parse as parse_swisscard
 from parsers.amazon    import parse as parse_amazon
 from parsers.ubs       import parse as parse_ubs
+from parsers.cs        import parse as parse_cs
 from db import (
     insert_transaction, categorize_transaction,
     create_import_log, update_import_log, get_conn
@@ -124,6 +125,9 @@ def import_file(filepath: str, force_account_id: str = None) -> dict:
 
         elif detection["source"] == SOURCE_UBS:
             transactions = parse_ubs(filepath, account_id, import_id)
+
+        elif detection["source"] == SOURCE_CS:
+            transactions = parse_cs(filepath, account_id, import_id)
 
         else:
             result["status"] = "error"

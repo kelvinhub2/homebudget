@@ -5,9 +5,11 @@ import { Card, Label, Btn, Badge, Spinner, TxTable, formatCHF, L1_COLORS } from 
 export default function Transactions() {
   const [search,       setSearch]       = useState("");
   const [filterL1,     setFilterL1]     = useState("");
+  const [filterL2,     setFilterL2]     = useState("");
   const [filterAcc,    setFilterAcc]    = useState("");
   const [filterMonth,  setFilterMonth]  = useState("");
-  const [showInternal, setShowInternal] = useState(false);  // CR-028
+  const [showInternal, setShowInternal] = useState(0);  // 0=hide, 1=include, 2=only
+  const [sort,         setSort]         = useState("");
   const [data,         setData]         = useState(null);
   const [loading,      setLoading]      = useState(true);
   const [editing,      setEditing]      = useState(null);
@@ -25,11 +27,11 @@ export default function Transactions() {
 
   const load = useCallback(() => {
     setLoading(true);
-    getTransactions({ search, l1:filterL1, account:filterAcc, month:filterMonth,
-                      show_internal: showInternal ? 1 : 0, limit:200 })
+    getTransactions({ search, l1:filterL1, l2:filterL2, account:filterAcc, month:filterMonth,
+                      show_internal: showInternal, sort: sort||undefined, limit:200 })
       .then(setData)
       .finally(() => setLoading(false));
-  }, [search, filterL1, filterAcc, filterMonth, showInternal]);
+  }, [search, filterL1, filterL2, filterAcc, filterMonth, showInternal, sort]);
 
   useEffect(() => {
     const t = setTimeout(load, 300);
@@ -39,15 +41,18 @@ export default function Transactions() {
   const saveEdit = async () => {
     if (!editing) return;
     await updateTransaction(editing.id, {
-      l1: editing.l1, l2: editing.l2, merchant_clean: editing.merchant_clean
+      l1: editing.l1, l2: editing.l2,
+      merchant_clean: editing.merchant_clean,
+      is_internal: editing.is_internal ? 1 : 0,
     });
     setEditing(null);
     load();
   };
 
-  const accounts = [...new Set((data?.transactions||[]).map(t=>t.account_name).filter(Boolean))];
-  const l1List   = Object.keys(taxonomy);
-  const l2List   = taxonomy[editing?.l1] || [];
+  const accounts    = [...new Set((data?.transactions||[]).map(t=>t.account_name).filter(Boolean))];
+  const l1List      = Object.keys(taxonomy);
+  const l2List      = taxonomy[editing?.l1] || [];
+  const filterL2List = filterL1 ? (taxonomy[filterL1] || []) : Object.values(taxonomy).flat();
 
   return (
     <Card>
@@ -57,25 +62,40 @@ export default function Transactions() {
           style={{ flex:1, minWidth:180, background:"var(--faint)", border:"1px solid var(--border)", borderRadius:4, padding:"7px 12px", color:"var(--text)", fontFamily:"'DM Mono',monospace", fontSize:12 }}/>
         <input value={filterMonth} onChange={e=>setFilterMonth(e.target.value)} placeholder="YYYY-MM"
           style={{ width:100, background:"var(--faint)", border:"1px solid var(--border)", borderRadius:4, padding:"7px 10px", color:"var(--text)", fontFamily:"'DM Mono',monospace", fontSize:11 }}/>
-        <select value={filterL1} onChange={e=>setFilterL1(e.target.value)}
+        <select value={filterL1} onChange={e=>{setFilterL1(e.target.value);setFilterL2("");}}
           style={{ background:"var(--faint)", border:"1px solid var(--border)", borderRadius:4, padding:"7px 10px", color:"var(--text)", fontFamily:"'DM Mono',monospace", fontSize:11 }}>
           <option value="">All L1</option>
           {l1List.map(l=><option key={l}>{l}</option>)}
+        </select>
+        <select value={filterL2} onChange={e=>setFilterL2(e.target.value)}
+          style={{ background:"var(--faint)", border:"1px solid var(--border)", borderRadius:4, padding:"7px 10px", color:"var(--text)", fontFamily:"'DM Mono',monospace", fontSize:11 }}>
+          <option value="">All L2</option>
+          {[...new Set(filterL2List)].sort().map(l=><option key={l}>{l}</option>)}
         </select>
         <select value={filterAcc} onChange={e=>setFilterAcc(e.target.value)}
           style={{ background:"var(--faint)", border:"1px solid var(--border)", borderRadius:4, padding:"7px 10px", color:"var(--text)", fontFamily:"'DM Mono',monospace", fontSize:11 }}>
           <option value="">All accounts</option>
           {accounts.map(a=><option key={a}>{a}</option>)}
         </select>
-        {(search||filterL1||filterAcc||filterMonth) &&
-          <Btn small onClick={()=>{setSearch("");setFilterL1("");setFilterAcc("");setFilterMonth("")}}>× Reset</Btn>}
-        <button onClick={()=>setShowInternal(v=>!v)} style={{
+        {(search||filterL1||filterL2||filterAcc||filterMonth) &&
+          <Btn small onClick={()=>{setSearch("");setFilterL1("");setFilterL2("");setFilterAcc("");setFilterMonth("")}}>× Reset</Btn>}
+        <select value={sort} onChange={e=>setSort(e.target.value)}
+          style={{ background:"var(--faint)", border:"1px solid var(--border)", borderRadius:4, padding:"7px 10px", color:"var(--muted)", fontFamily:"'DM Mono',monospace", fontSize:11 }}>
+          <option value="">Date ↓</option>
+          <option value="merchant">Merchant ↑</option>
+          <option value="-merchant">Merchant ↓</option>
+          <option value="l1">L1 ↑</option>
+          <option value="l2">L2 ↑</option>
+          <option value="amount">CHF ↑</option>
+          <option value="-amount">CHF ↓</option>
+        </select>
+        <button onClick={()=>setShowInternal(v=>(v+1)%3)} style={{
           padding:"5px 10px", borderRadius:4, fontSize:10, cursor:"pointer",
           border:"1px solid var(--border)", fontFamily:"inherit", letterSpacing:"0.08em",
-          background: showInternal ? "var(--orange)" : "var(--faint)",
-          color: showInternal ? "#fff" : "var(--muted)"
+          background: showInternal===2 ? "var(--orange)" : showInternal===1 ? "var(--accent)" : "var(--faint)",
+          color: showInternal>0 ? "#fff" : "var(--muted)"
         }}>
-          {showInternal ? "HIDE INTERNALS" : "SHOW INTERNALS"}
+          {showInternal===2 ? "ONLY INTERNALS" : showInternal===1 ? "+ INTERNALS" : "INTERNALS"}
         </button>
         <span style={{ fontSize:10, color:"var(--muted)", marginLeft:"auto" }}>
           {loading ? "…" : `${data?.total||0} transactions`}
@@ -132,6 +152,16 @@ export default function Transactions() {
                 {l2List.map(l=><option key={l}>{l}</option>)}
               </select>
             </div>
+            {/* Internal transfer toggle */}
+            <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:20, padding:"10px 12px", background: editing.is_internal ? "var(--orange)18" : "var(--faint)", border:`1px solid ${editing.is_internal ? "var(--orange)60" : "var(--border)"}`, borderRadius:6 }}>
+              <input type="checkbox" id="is_internal" checked={!!editing.is_internal}
+                onChange={e => setEditing({...editing, is_internal: e.target.checked ? 1 : 0})}
+                style={{ cursor:"pointer", accentColor:"var(--orange)" }}/>
+              <label htmlFor="is_internal" style={{ fontSize:11, color: editing.is_internal ? "var(--orange)" : "var(--text2)", cursor:"pointer", letterSpacing:"0.06em" }}>
+                INTERNAL TRANSFER — excluded from all reports
+              </label>
+            </div>
+
             <div style={{ display:"flex", gap:8 }}>
               <Btn variant="primary" style={{ flex:1 }} onClick={saveEdit}>SAVE</Btn>
               <Btn onClick={()=>setEditing(null)}>CANCEL</Btn>

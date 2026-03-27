@@ -72,6 +72,7 @@ def init_db():
             amount_min      REAL,                        -- optional amount range filter
             amount_max      REAL,
             is_recurring    INTEGER DEFAULT 0,           -- if 1, also sets is_recurring on match
+            is_internal     INTEGER DEFAULT 0,           -- if 1, also sets is_internal on match
             l1              TEXT NOT NULL DEFAULT '',
             l2              TEXT NOT NULL DEFAULT '',
             active          INTEGER DEFAULT 1,           -- 0 = disabled
@@ -101,6 +102,15 @@ def init_db():
             UNIQUE(l1, l2)
         );
         """)
+    # Migrations — safe to run repeatedly (ignore errors if column already exists)
+    with get_conn() as conn:
+        for stmt in [
+            "ALTER TABLE rules ADD COLUMN is_internal INTEGER DEFAULT 0",
+        ]:
+            try:
+                conn.execute(stmt)
+            except Exception:
+                pass
     _seed_taxonomy()
 
 
@@ -199,8 +209,10 @@ def categorize_transaction(raw_text: str, merchant: str, amount: float) -> dict:
         if rule["merchant"] and rule["merchant"].upper() not in merchant_upper:
             continue
         # keyword match (required if merchant is empty, otherwise optional)
+        # ";" = OR alternatives; space within a term = AND (all parts must appear)
         if rule["keyword"]:
-            if rule["keyword"].upper() not in text_upper:
+            alternatives = [a.strip() for a in rule["keyword"].upper().split(";") if a.strip()]
+            if not any(all(part in text_upper for part in alt.split()) for alt in alternatives):
                 continue
         elif not rule["merchant"]:
             continue  # neither merchant nor keyword — skip invalid rule
@@ -214,10 +226,11 @@ def categorize_transaction(raw_text: str, merchant: str, amount: float) -> dict:
             "l1":           rule["l1"],
             "l2":           rule["l2"],
             "is_recurring": rule["is_recurring"],
+            "is_internal":  rule.get("is_internal", 0),
             "rule_id":      rule["id"],
         }
 
-    return {"l1": "", "l2": "", "is_recurring": 0, "rule_id": None}
+    return {"l1": "", "l2": "", "is_recurring": 0, "is_internal": 0, "rule_id": None}
 
 
 def recategorize_all():
@@ -239,9 +252,9 @@ def recategorize_all():
             )
             conn.execute("""
                 UPDATE transactions
-                SET l1 = ?, l2 = ?, is_recurring = ?
+                SET l1 = ?, l2 = ?, is_recurring = ?, is_internal = ?
                 WHERE id = ?
-            """, (result["l1"], result["l2"], result["is_recurring"], tx["id"]))
+            """, (result["l1"], result["l2"], result["is_recurring"], result["is_internal"], tx["id"]))
             updated += 1
     return updated
 
@@ -257,6 +270,41 @@ def get_taxonomy() -> dict:
     result = {}
     for row in rows:
         result.setdefault(row["l1"], []).append(row["l2"])
+    return result
+
+
+def get_taxonomy_counts() -> dict:
+    """Returns {l1: {total_tx, total_rules, l2s: {l2: {tx, rules}}}}."""
+    with get_conn() as conn:
+        tx_rows = conn.execute("""
+            SELECT l1, l2, COUNT(*) as cnt FROM transactions
+            WHERE l1 != '' AND l1 IS NOT NULL GROUP BY l1, l2
+        """).fetchall()
+        rule_rows = conn.execute("""
+            SELECT l1, l2, COUNT(*) as cnt FROM rules
+            WHERE active=1 AND l1 != '' GROUP BY l1, l2
+        """).fetchall()
+
+    result = {}
+
+    def ensure(l1, l2):
+        if l1 not in result:
+            result[l1] = {"l2s": {}}
+        if l2 not in result[l1]["l2s"]:
+            result[l1]["l2s"][l2] = {"tx": 0, "rules": 0}
+
+    for row in tx_rows:
+        ensure(row["l1"], row["l2"])
+        result[row["l1"]]["l2s"][row["l2"]]["tx"] = row["cnt"]
+
+    for row in rule_rows:
+        ensure(row["l1"], row["l2"])
+        result[row["l1"]]["l2s"][row["l2"]]["rules"] = row["cnt"]
+
+    for data in result.values():
+        data["total_tx"]    = sum(d["tx"]    for d in data["l2s"].values())
+        data["total_rules"] = sum(d["rules"] for d in data["l2s"].values())
+
     return result
 
 
@@ -291,19 +339,35 @@ def rename_category(old_l1: str, old_l2: Optional[str],
 
 
 def delete_l2(l1: str, l2: str, move_to_l1: str, move_to_l2: str):
-    """Delete L2 category and move all transactions to another category."""
+    """Delete L2 category. If move_to_l1 is given, reassign transactions and rules."""
     with get_conn() as conn:
         conn.execute(
             "DELETE FROM taxonomy WHERE l1=? AND l2=?", (l1, l2)
         )
-        conn.execute(
-            "UPDATE transactions SET l1=?, l2=? WHERE l1=? AND l2=?",
-            (move_to_l1, move_to_l2, l1, l2)
-        )
-        conn.execute(
-            "UPDATE rules SET l1=?, l2=? WHERE l1=? AND l2=?",
-            (move_to_l1, move_to_l2, l1, l2)
-        )
+        if move_to_l1:
+            conn.execute(
+                "UPDATE transactions SET l1=?, l2=? WHERE l1=? AND l2=?",
+                (move_to_l1, move_to_l2, l1, l2)
+            )
+            conn.execute(
+                "UPDATE rules SET l1=?, l2=? WHERE l1=? AND l2=?",
+                (move_to_l1, move_to_l2, l1, l2)
+            )
+
+
+def delete_l1(l1: str, move_to_l1: str, move_to_l2: str):
+    """Delete entire L1. If move_to_l1 is given, reassign all transactions and rules."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM taxonomy WHERE l1=?", (l1,))
+        if move_to_l1:
+            conn.execute(
+                "UPDATE transactions SET l1=?, l2=? WHERE l1=?",
+                (move_to_l1, move_to_l2, l1)
+            )
+            conn.execute(
+                "UPDATE rules SET l1=?, l2=? WHERE l1=?",
+                (move_to_l1, move_to_l2, l1)
+            )
 
 
 # ── Import log ─────────────────────────────────────────────────────────────

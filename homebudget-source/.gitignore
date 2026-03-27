@@ -1,0 +1,28 @@
+# Node
+node_modules/
+npm-debug.log*
+
+# Build output
+dist/
+build/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data / secrets
+*.db
+*.sqlite
+config.yaml
+.env
+
+# IDE
+.vscode/
+.idea/

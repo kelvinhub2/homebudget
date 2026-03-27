@@ -60,10 +60,13 @@ export const testRule        = (text)    => get(`/api/rules/test?text=${encodeUR
 export const recategorize    = ()        => post("/api/rules/recategorize");
 
 // ── Taxonomy ───────────────────────────────────────────────────────────────
-export const getTaxonomy     = ()        => get("/api/taxonomy");
-export const addTaxonomy     = (body)    => post("/api/taxonomy", body);
-export const renameTaxonomy  = (body)    => patch("/api/taxonomy/rename", body);
-export const deleteTaxonomy  = (body)    => del("/api/taxonomy", body);
+export const migrateInternal   = (l2)     => post("/api/maintenance/migrate-internal", { l2 });
+export const getTaxonomy       = ()       => get("/api/taxonomy");
+export const getTaxonomyCounts = ()       => get("/api/taxonomy/counts");
+export const addTaxonomy       = (body)   => post("/api/taxonomy", body);
+export const renameTaxonomy    = (body)   => patch("/api/taxonomy/rename", body);
+export const deleteTaxonomy    = (body)   => del("/api/taxonomy", body);
+export const deleteTaxonomyL1  = (body)   => del("/api/taxonomy/l1", body);
 
 // ── Accounts ───────────────────────────────────────────────────────────────
 export const getAccounts     = ()        => get("/api/accounts");

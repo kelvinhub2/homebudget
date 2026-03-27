@@ -59,7 +59,7 @@ export default function Rules() {
   };
 
   const l1List = Object.keys(taxonomy);
-  const newRule = { merchant:"", keyword:"", l1:"", l2:"", priority:500, is_recurring:0, active:1 };
+  const newRule = { merchant:"", keyword:"", l1:"", l2:"", priority:500, is_recurring:0, is_internal:0, active:1 };
 
   // CR-016: filter rules
   const filteredRules = search.trim()
@@ -96,8 +96,8 @@ export default function Rules() {
           style={{ width:"100%", marginBottom:12, padding:"6px 10px", fontSize:12, boxSizing:"border-box" }}
         />
 
-        <div style={{ display:"grid", gridTemplateColumns:"44px 1fr 140px 120px 70px 50px 80px", gap:8, paddingBottom:10, borderBottom:"1px solid var(--border)" }}>
-          {["PRIO","MERCHANT / KEYWORD","L1","L2","RECUR.","ON",""].map(h=>(
+        <div style={{ display:"grid", gridTemplateColumns:"44px 1fr 140px 120px 60px 40px 50px 80px", gap:8, paddingBottom:10, borderBottom:"1px solid var(--border)" }}>
+          {["PRIO","MERCHANT / KEYWORD","L1","L2","RECUR.","INT.","ON",""].map(h=>(
             <div key={h} style={{ fontSize:9, letterSpacing:"0.12em", color:"var(--muted)" }}>{h}</div>
           ))}
         </div>
@@ -106,15 +106,25 @@ export default function Rules() {
           <div style={{ padding:"20px 0", color:"var(--muted)", fontSize:12, textAlign:"center" }}>No rules match "{search}"</div>
         )}
         {filteredRules.map(r => (
-          <div key={r.id} style={{ display:"grid", gridTemplateColumns:"44px 1fr 140px 120px 70px 50px 80px", gap:8, padding:"10px 0", borderBottom:"1px solid var(--faint)", alignItems:"center", fontSize:11, opacity:r.fallback?0.45:1 }}>
+          <div key={r.id} style={{ display:"grid", gridTemplateColumns:"44px 1fr 140px 120px 60px 40px 50px 80px", gap:8, padding:"10px 0", borderBottom:"1px solid var(--faint)", alignItems:"center", fontSize:11, opacity:r.fallback?0.45:1 }}>
             <div style={{ color:"var(--muted)", fontSize:10, fontFamily:"monospace" }}>{r.priority}</div>
             <div>
               <div style={{ color:"var(--text)" }}>{r.merchant}</div>
-              {r.keyword && <div style={{ fontSize:10, color:"var(--accent)", fontFamily:"monospace" }}>+ "{r.keyword}"</div>}
+              {r.keyword && (
+                <div style={{ display:"flex", flexWrap:"wrap", gap:4, marginTop:3 }}>
+                  {r.keyword.split(";").map((kw,i) => (
+                    <span key={i} style={{ display:"inline-flex", alignItems:"center", gap:4 }}>
+                      {i > 0 && <span style={{ fontSize:9, color:"var(--muted)" }}>·</span>}
+                      <span style={{ fontSize:10, color:"var(--accent)", fontFamily:"monospace", background:"var(--accent-bg)", padding:"1px 5px", borderRadius:3 }}>{kw.trim()}</span>
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
             <div>{r.l1?<Badge label={r.l1} color={L1_COLORS[r.l1]||"#888"}/>:<span style={{color:"var(--muted)"}}>—</span>}</div>
             <div style={{ color:"var(--text2)", fontSize:11 }}>{r.l2||"—"}</div>
-            <div style={{ fontSize:10, color:r.is_recurring?"var(--green)":"var(--muted)" }}>{r.is_recurring?"↺ Yes":"—"}</div>
+            <div style={{ fontSize:10, color:r.is_recurring?"var(--green)":"var(--muted)" }}>{r.is_recurring?"↺":"—"}</div>
+            <div style={{ fontSize:10, color:r.is_internal?"var(--orange)":"var(--muted)" }}>{r.is_internal?"⇄":"—"}</div>
             <div>
               <span style={{ width:7, height:7, borderRadius:"50%", background:r.active?"var(--green)":"#888", display:"inline-block", cursor:"pointer" }}
                 onClick={()=>updateRule(r.id,{active:r.active?0:1}).then(load)}/>
@@ -178,7 +188,7 @@ function RuleModal({ rule, taxonomy, onSave, onClose }) {
         <Label>{form.id ? "EDIT RULE" : "NEW RULE"}</Label>
 
         {[["MERCHANT",    "merchant",  "text",   "e.g. Migros"],
-          ["KEYWORD",     "keyword",   "text",   "optional — narrows match"],
+          ["KEYWORD  ( ; = OR  ·  space = AND )", "keyword", "text", "e.g. Geld erhalten;Geld gesendet"],
           ["PRIORITY",    "priority",  "number", "lower = higher priority"],
         ].map(([label, key, type, ph]) => (
           <div key={key} style={{ marginBottom:10 }}>
@@ -205,9 +215,13 @@ function RuleModal({ rule, taxonomy, onSave, onClose }) {
             {l2List.map(l=><option key={l}>{l}</option>)}
           </select>
         </div>
-        <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:20 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:10 }}>
           <input type="checkbox" checked={!!form.is_recurring} onChange={e=>setForm({...form,is_recurring:e.target.checked?1:0})} id="rec"/>
           <label htmlFor="rec" style={{ fontSize:11, color:"var(--text2)", cursor:"pointer" }}>Mark matched transactions as recurring</label>
+        </div>
+        <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:20, padding:"8px 10px", background:form.is_internal?"var(--orange)18":"var(--faint)", border:`1px solid ${form.is_internal?"var(--orange)60":"var(--border)"}`, borderRadius:6 }}>
+          <input type="checkbox" checked={!!form.is_internal} onChange={e=>setForm({...form,is_internal:e.target.checked?1:0})} id="isint" style={{ accentColor:"var(--orange)", cursor:"pointer" }}/>
+          <label htmlFor="isint" style={{ fontSize:11, color:form.is_internal?"var(--orange)":"var(--text2)", cursor:"pointer" }}>Mark matched transactions as internal transfer (excluded from reports)</label>
         </div>
 
         <div style={{ display:"flex", gap:8 }}>

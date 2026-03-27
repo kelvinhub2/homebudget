@@ -107,15 +107,22 @@ async def trigger_scan(_user = Depends(require_auth)):
 def get_transactions(
     month:         Optional[str] = Query(None, description="YYYY-MM"),
     l1:            Optional[str] = None,
+    l2:            Optional[str] = None,
     account:       Optional[str] = None,
     search:        Optional[str] = None,
-    show_internal: Optional[int] = 0,
+    show_internal: Optional[int] = 0,  # 0=hide, 1=include, 2=only
+    sort:          Optional[str] = None,
     limit:         int = 500,
     offset:        int = 0,
     _user = Depends(require_auth)
 ):
     with db.get_conn() as conn:
-        where  = [] if show_internal else ["is_internal = 0"]
+        if show_internal == 2:
+            where = ["is_internal = 1"]
+        elif show_internal == 1:
+            where = []
+        else:
+            where = ["is_internal = 0"]
         params = []
 
         if month:
@@ -124,6 +131,9 @@ def get_transactions(
         if l1:
             where.append("l1 = ?")
             params.append(l1)
+        if l2:
+            where.append("l2 = ?")
+            params.append(l2)
         if account:
             where.append("account_id = ?")
             params.append(account)
@@ -131,12 +141,24 @@ def get_transactions(
             where.append("(merchant_clean LIKE ? OR raw_text LIKE ?)")
             params += [f"%{search}%", f"%{search}%"]
 
+        _sort_map = {
+            "merchant":  "merchant_clean ASC, date DESC",
+            "-merchant": "merchant_clean DESC, date DESC",
+            "l1":        "l1 ASC, l2 ASC, date DESC",
+            "-l1":       "l1 DESC, date DESC",
+            "l2":        "l2 ASC, date DESC",
+            "-l2":       "l2 DESC, date DESC",
+            "amount":    "amount ASC",
+            "-amount":   "amount DESC",
+        }
+        order_by = _sort_map.get(sort or "", "date DESC, id DESC")
+
         sql = f"""
             SELECT t.*, a.name as account_name
             FROM transactions t
             LEFT JOIN accounts a ON t.account_id = a.id
             WHERE {' AND '.join(where)}
-            ORDER BY date DESC, id DESC
+            ORDER BY {order_by}
             LIMIT ? OFFSET ?
         """
         params += [limit, offset]
@@ -181,7 +203,7 @@ def update_transaction(
     _user = Depends(require_auth)
 ):
     """Update category / merchant on a transaction. Sets manually_reviewed=1."""
-    allowed = {"l1", "l2", "merchant_clean", "is_recurring", "is_sub"}
+    allowed = {"l1", "l2", "merchant_clean", "is_recurring", "is_sub", "is_internal"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         raise HTTPException(400, "No valid fields to update")
@@ -226,9 +248,10 @@ def approve_transaction(
     - Save rule to DB
     - Optionally apply rule retrospectively
     """
-    l1       = body.get("l1", "")
-    l2       = body.get("l2", "")
-    keyword  = body.get("keyword", "")
+    l1          = body.get("l1", "")
+    l2          = body.get("l2", "")
+    keyword     = body.get("keyword", "")
+    no_merchant = body.get("no_merchant", False)
     apply_retrospective = body.get("apply_retrospective", False)
 
     if not l1:
@@ -249,8 +272,8 @@ def approve_transaction(
             WHERE id=?
         """, (l1, l2, tx_id))
 
-        # Save rule
-        merchant = dict(tx)["merchant_clean"] or ""
+        # Save rule — keyword-only when no_merchant=True
+        merchant = "" if no_merchant else (dict(tx)["merchant_clean"] or "")
         conn.execute("""
             INSERT INTO rules (merchant, keyword, l1, l2, priority)
             VALUES (?, ?, ?, ?, 500)
@@ -311,14 +334,21 @@ Transaction:
 - Booking text (anonymised): {anon_text}
 
 Respond with JSON only, no explanation:
-{{"l1": "...", "l2": "...", "confidence": 0.0-1.0, "reasoning": "one sentence"}}
-"""
+{{
+  "l1": "...",
+  "l2": "...",
+  "confidence": 0.0-1.0,
+  "merchant_name": "full identified business name",
+  "place": "city, country (or empty string if unknown)",
+  "business_type": "short type description e.g. Supermarket, Pharmacy, Restaurant, Online retailer",
+  "reasoning": "one sentence why this category"
+}}"""
 
     try:
         client   = anthropic.Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
         response = client.messages.create(
             model      = "claude-sonnet-4-20250514",
-            max_tokens = 200,
+            max_tokens = 300,
             messages   = [{"role": "user", "content": prompt}]
         )
         text   = response.content[0].text.strip()
@@ -382,7 +412,7 @@ L1 categories: {', '.join(l1_list)}
 L2 per L1: {json.dumps(taxonomy)}
 
 Return a JSON array with exactly {len(chunk)} objects in order:
-[{{"merchant":"...","l1":"...","l2":"...","confidence":0.0}}]
+[{{"merchant":"...","l1":"...","l2":"...","confidence":0.0,"business_type":"short type e.g. Supermarket","place":"city, country or empty"}}]
 
 Merchants:
 {chr(10).join(ml)}
@@ -392,7 +422,7 @@ Return ONLY the JSON array."""
         try:
             response = client.messages.create(
                 model      = "claude-sonnet-4-20250514",
-                max_tokens = 1500,
+                max_tokens = 2000,
                 messages   = [{"role": "user", "content": prompt}]
             )
             text = response.content[0].text.strip()
@@ -413,10 +443,12 @@ Return ONLY the JSON array."""
             merchant = chunk[i]
             for tx_id in merchant_to_ids[merchant]:
                 output[tx_id] = {
-                    "l1":        res.get("l1", ""),
-                    "l2":        res.get("l2", ""),
-                    "confidence":res.get("confidence", 0),
-                    "merchant":  merchant,
+                    "l1":           res.get("l1", ""),
+                    "l2":           res.get("l2", ""),
+                    "confidence":   res.get("confidence", 0),
+                    "merchant":     merchant,
+                    "business_type": res.get("business_type", ""),
+                    "place":        res.get("place", ""),
                 }
 
     return output
@@ -437,9 +469,9 @@ def create_rule(body: dict, _user = Depends(require_auth)):
     with db.get_conn() as conn:
         cur = conn.execute("""
             INSERT INTO rules (merchant, keyword, l1, l2, priority,
-                               amount_min, amount_max, is_recurring)
+                               amount_min, amount_max, is_recurring, is_internal)
             VALUES (:merchant, :keyword, :l1, :l2, :priority,
-                    :amount_min, :amount_max, :is_recurring)
+                    :amount_min, :amount_max, :is_recurring, :is_internal)
         """, {
             "merchant":    body["merchant"],
             "keyword":     body.get("keyword", ""),
@@ -449,6 +481,7 @@ def create_rule(body: dict, _user = Depends(require_auth)):
             "amount_min":  body.get("amount_min"),
             "amount_max":  body.get("amount_max"),
             "is_recurring": body.get("is_recurring", 0),
+            "is_internal":  body.get("is_internal", 0),
         })
         return {"id": cur.lastrowid, "ok": True}
 
@@ -456,7 +489,7 @@ def create_rule(body: dict, _user = Depends(require_auth)):
 @app.patch("/api/rules/{rule_id}")
 def update_rule(rule_id: int, body: dict, _user = Depends(require_auth)):
     allowed = {"merchant", "keyword", "l1", "l2", "priority",
-               "amount_min", "amount_max", "is_recurring", "active"}
+               "amount_min", "amount_max", "is_recurring", "is_internal", "active"}
     updates = {k: v for k, v in body.items() if k in allowed}
     if not updates:
         raise HTTPException(400, "No valid fields")
@@ -475,6 +508,23 @@ def delete_rule(rule_id: int, _user = Depends(require_auth)):
     with db.get_conn() as conn:
         conn.execute("DELETE FROM rules WHERE id=?", (rule_id,))
     return {"ok": True}
+
+
+@app.post("/api/maintenance/migrate-internal")
+def migrate_internal(body: dict, _user = Depends(require_auth)):
+    """
+    Bulk-convert transactions with a given L2 label to is_internal=1.
+    Also sets manually_reviewed=1 so they won't be re-categorised.
+    """
+    l2_label = body.get("l2", "Internal Transfer").strip()
+    if not l2_label:
+        raise HTTPException(400, "l2 required")
+    with db.get_conn() as conn:
+        cur = conn.execute(
+            "UPDATE transactions SET is_internal=1, manually_reviewed=1 WHERE l2=? AND is_internal=0",
+            (l2_label,)
+        )
+    return {"migrated": cur.rowcount, "l2": l2_label}
 
 
 @app.post("/api/rules/recategorize")
@@ -691,6 +741,11 @@ def get_taxonomy(_user = Depends(require_auth)):
     return db.get_taxonomy()
 
 
+@app.get("/api/taxonomy/counts")
+def get_taxonomy_counts(_user = Depends(require_auth)):
+    return db.get_taxonomy_counts()
+
+
 @app.post("/api/taxonomy")
 def add_taxonomy(body: dict, _user = Depends(require_auth)):
     l1 = body.get("l1", "").strip()
@@ -717,8 +772,17 @@ def rename_taxonomy(body: dict, _user = Depends(require_auth)):
 def delete_taxonomy(body: dict, _user = Depends(require_auth)):
     db.delete_l2(
         body["l1"], body["l2"],
-        body["move_to_l1"], body["move_to_l2"]
+        body.get("move_to_l1", ""), body.get("move_to_l2", "")
     )
+    return {"ok": True}
+
+
+@app.delete("/api/taxonomy/l1")
+def delete_taxonomy_l1(body: dict, _user = Depends(require_auth)):
+    l1 = body.get("l1", "").strip()
+    if not l1:
+        raise HTTPException(400, "l1 required")
+    db.delete_l1(l1, body.get("move_to_l1", ""), body.get("move_to_l2", ""))
     return {"ok": True}
 
 

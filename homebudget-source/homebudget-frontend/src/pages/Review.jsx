@@ -41,12 +41,13 @@ export default function Review() {
   const [suggesting, setSugging]  = useState(false);
   const [sel,        setSel]      = useState(null);
   const [editSugg,   setEditSugg] = useState(null);
-  const [showRetro,  setShowRetro]= useState(null);
   const [loading,    setLoading]  = useState(true);
   const [approving,  setApproving]= useState(false);
   const [sortMode,   setSortMode] = useState("l1");
   const [confThresh, setConfThresh]= useState(90);
-  const [keyword,    setKeyword]  = useState("");
+  const [keyword,     setKeyword]    = useState("");
+  const [keywordOnly, setKeywordOnly]= useState(false);
+  const [search,      setSearch]     = useState("");
 
   useEffect(() => {
     Promise.all([getUnclassified(), getTaxonomy()])
@@ -90,38 +91,37 @@ export default function Review() {
     } finally { setSugging(false); }
   };
 
-  // ── Approve single ────────────────────────────────────────────────────────
-  const approveSingle = async (tx, retroYes) => {
+  // ── Re-fetch unclassified list and preserve selection ─────────────────────
+  const refreshList = async (removedIds = []) => {
+    const fresh = await getUnclassified();
+    setItems(fresh);
+    // Keep selection if still unclassified, else pick first
+    setSel(prev => fresh.find(t => t.id === prev?.id) || fresh[0] || null);
+    removedIds.forEach(id => removeSuggestionFromCache(id));
+    setEditSugg(null);
+  };
+
+  // ── Approve single — always apply to matching unreviewed transactions ──────
+  const approveSingle = async (tx, retroYes = true) => {
     const s = editSugg || suggestions[tx.id];
     if (!s?.l1 || !s?.l2) return;
     setApproving(true);
     try {
-      await approveTransaction(tx.id, { l1:s.l1, l2:s.l2, keyword:"", apply_retrospective:retroYes });
-      removeSuggestionFromCache(tx.id);
-      const remain = items.filter(t => t.id !== tx.id);
-      setItems(remain);
-      setSel(remain[0] || null);
-      setEditSugg(null);
-      setShowRetro(null);
+      await approveTransaction(tx.id, { l1:s.l1, l2:s.l2, keyword, no_merchant: keywordOnly, apply_retrospective: retroYes });
+      await refreshList([tx.id]);
     } finally { setApproving(false); }
   };
 
   // ── Approve group ─────────────────────────────────────────────────────────
-  const approveGroup = async (groupItems, retroYes) => {
+  const approveGroup = async (groupItems) => {
     setApproving(true);
     try {
       for (const tx of groupItems) {
         const s = suggestions[tx.id];
         if (!s?.l1 || !s?.l2) continue;
-        await approveTransaction(tx.id, { l1:s.l1, l2:s.l2, keyword:"", apply_retrospective:retroYes });
-        removeSuggestionFromCache(tx.id);
+        await approveTransaction(tx.id, { l1:s.l1, l2:s.l2, keyword:"", apply_retrospective: true });
       }
-      const ids    = new Set(groupItems.map(t => t.id));
-      const remain = items.filter(t => !ids.has(t.id));
-      setItems(remain);
-      setSel(remain[0] || null);
-      setEditSugg(null);
-      setShowRetro(null);
+      await refreshList(groupItems.map(t => t.id));
     } finally { setApproving(false); }
   };
 
@@ -132,47 +132,54 @@ export default function Review() {
       return s?.l1 && s?.l2 && (s.confidence || 0) * 100 >= confThresh;
     });
     if (!eligible.length) { alert("No suggestions above threshold"); return; }
-    if (!confirm(`Approve ${eligible.length} transactions with ≥${confThresh}% confidence? Rules will be saved, applied to future only.`)) return;
+    if (!confirm(`Approve ${eligible.length} transactions with ≥${confThresh}% confidence?`)) return;
     setApproving(true);
     try {
       for (const tx of eligible) {
         const s = suggestions[tx.id];
-        await approveTransaction(tx.id, { l1:s.l1, l2:s.l2, keyword:"", apply_retrospective:false });
-        removeSuggestionFromCache(tx.id);
+        await approveTransaction(tx.id, { l1:s.l1, l2:s.l2, keyword:"", apply_retrospective: true });
       }
-      const ids    = new Set(eligible.map(t => t.id));
-      const remain = items.filter(t => !ids.has(t.id));
-      setItems(remain);
-      setSel(remain[0] || null);
+      await refreshList(eligible.map(t => t.id));
     } finally { setApproving(false); }
   };
 
-  // ── Grouping & sorting ────────────────────────────────────────────────────
-  const getSorted = () => {
-    if (sortMode === "confidence") {
-      return [...items].sort((a,b) => {
-        const ca = suggestions[a.id]?.confidence || 0;
-        const cb = suggestions[b.id]?.confidence || 0;
-        return cb - ca;
-      });
-    }
-    if (sortMode === "amount") {
-      return [...items].sort((a,b) => Math.abs(b.amount) - Math.abs(a.amount));
-    }
-    return items; // l1 grouping handled below
+  // ── Search filter ─────────────────────────────────────────────────────────
+  const getFiltered = () => {
+    if (!search.trim()) return items;
+    const q = search.toLowerCase();
+    return items.filter(tx =>
+      (tx.merchant_clean || "").toLowerCase().includes(q) ||
+      (tx.raw_text || "").toLowerCase().includes(q)
+    );
   };
 
+  // ── Grouping ──────────────────────────────────────────────────────────────
   const groupBySuggestion = () => {
-    const sorted = getSorted();
-    if (sortMode !== "l1") {
-      return [["— sorted —", sorted]];
+    const filtered = getFiltered();
+
+    if (sortMode === "amount") {
+      return [
+        ["≥ CHF 500",  filtered.filter(tx => Math.abs(tx.amount) >= 500).sort((a,b) => Math.abs(b.amount)-Math.abs(a.amount))],
+        ["CHF 50–500", filtered.filter(tx => Math.abs(tx.amount) >= 50 && Math.abs(tx.amount) < 500).sort((a,b) => Math.abs(b.amount)-Math.abs(a.amount))],
+        ["< CHF 50",   filtered.filter(tx => Math.abs(tx.amount) < 50).sort((a,b) => Math.abs(b.amount)-Math.abs(a.amount))],
+      ].filter(([,g]) => g.length > 0);
     }
+
+    if (sortMode === "confidence") {
+      const conf = tx => suggestions[tx.id]?.confidence || 0;
+      return [
+        ["HIGH ≥ 80%",    filtered.filter(tx => conf(tx) >= 0.8).sort((a,b) => conf(b)-conf(a))],
+        ["MEDIUM 50–80%", filtered.filter(tx => conf(tx) >= 0.5 && conf(tx) < 0.8).sort((a,b) => conf(b)-conf(a))],
+        ["LOW < 50%",     filtered.filter(tx => conf(tx) > 0 && conf(tx) < 0.5).sort((a,b) => conf(b)-conf(a))],
+        ["NO SUGGESTION", filtered.filter(tx => !suggestions[tx.id])],
+      ].filter(([,g]) => g.length > 0);
+    }
+
+    // l1 grouping (default)
     const groups = {};
-    for (const tx of sorted) {
-      const s   = suggestions[tx.id];
-      const key = s?.l1 || "⬜ No suggestion yet";
-      groups[key] = groups[key] || [];
-      groups[key].push(tx);
+    for (const tx of filtered) {
+      const key = suggestions[tx.id]?.l1 || "⬜ No suggestion yet";
+      (groups[key] = groups[key] || []).push(tx);
     }
     return Object.entries(groups).sort(([a],[b]) => {
       if (a.startsWith("⬜")) return 1;
@@ -182,11 +189,18 @@ export default function Review() {
   };
 
   const hasSuggestions  = Object.keys(suggestions).length > 0;
+  const filtered        = getFiltered();
   const groups          = groupBySuggestion();
-  const l1List          = Object.keys(tax);
   const selSugg         = editSugg || (sel && suggestions[sel.id]);
   const cachedCount     = items.filter(tx => suggestions[tx.id]).length;
   const highConfCount   = items.filter(tx => (suggestions[tx.id]?.confidence||0)*100 >= confThresh).length;
+
+  // L1/L2 filtered + sorted options
+  const curL1 = editSugg?.l1 || selSugg?.l1 || "";
+  const curL2 = editSugg?.l2 || selSugg?.l2 || "";
+  const l1Options = curL2
+    ? Object.keys(tax).filter(l1 => (tax[l1]||[]).includes(curL2)).sort()
+    : Object.keys(tax).sort();
 
   if (loading) return <Spinner/>;
 
@@ -199,7 +213,7 @@ export default function Review() {
         <div style={{ padding:"16px 20px", borderBottom:"1px solid var(--border)" }}>
           <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom: hasSuggestions ? 10 : 0 }}>
             <Label style={{ marginBottom:0 }}>
-              UNCLASSIFIED — {items.length} PENDING
+              UNCLASSIFIED — {search ? `${filtered.length} / ${items.length}` : items.length} PENDING
               {cachedCount > 0 && <span style={{ color:"var(--green)", marginLeft:8 }}>✓ {cachedCount} suggested</span>}
             </Label>
             <div style={{ display:"flex", gap:8, alignItems:"center" }}>
@@ -210,9 +224,18 @@ export default function Review() {
             </div>
           </div>
 
+          {/* Search */}
+          <div style={{ marginTop:10 }}>
+            <input
+              placeholder="Search merchant or booking text…"
+              value={search} onChange={e => setSearch(e.target.value)}
+              style={{ width:"100%", background:"var(--faint)", border:"1px solid var(--border)", borderRadius:4, padding:"6px 10px", color:"var(--text)", fontFamily:"inherit", fontSize:12, boxSizing:"border-box" }}
+            />
+          </div>
+
           {/* Sort + bulk approve controls — shown after suggestions loaded */}
           {hasSuggestions && (
-            <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
+            <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap", marginTop:8 }}>
               <span style={{ fontSize:9, color:"var(--muted)", letterSpacing:"0.1em" }}>GROUP BY</span>
               {[["l1","L1"],["confidence","CONFIDENCE ↓"],["amount","AMOUNT ↓"]].map(([v,l]) => (
                 <button key={v} onClick={()=>setSortMode(v)}
@@ -245,26 +268,24 @@ export default function Review() {
 
             return (
               <div key={l1Key}>
-                {sortMode === "l1" && (
-                  <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"7px 20px", background:"var(--surface2)", borderBottom:"1px solid var(--faint)" }}>
-                    <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                      <div style={{ width:3, height:14, borderRadius:2, background:hasSugg?color:"var(--border)" }}/>
-                      <span style={{ fontSize:10, letterSpacing:"0.1em", color:hasSugg?color:"var(--muted)" }}>{l1Key.toUpperCase()}</span>
-                      <span style={{ fontSize:10, color:"var(--muted)" }}>({groupItems.length})</span>
-                    </div>
-                    {hasSugg && allHaveL2 && (
-                      <Btn small variant="green" onClick={()=>setShowRetro({type:"group",items:groupItems,l1:l1Key})} disabled={approving}>
-                        ✓ APPROVE ALL
-                      </Btn>
-                    )}
+                <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", padding:"7px 20px", background:"var(--surface2)", borderBottom:"1px solid var(--faint)" }}>
+                  <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+                    <div style={{ width:3, height:14, borderRadius:2, background:hasSugg?color:"var(--border)" }}/>
+                    <span style={{ fontSize:10, letterSpacing:"0.1em", color:hasSugg?color:"var(--muted)" }}>{l1Key.toUpperCase()}</span>
+                    <span style={{ fontSize:10, color:"var(--muted)" }}>({groupItems.length})</span>
                   </div>
-                )}
+                  {sortMode === "l1" && hasSugg && allHaveL2 && (
+                    <Btn small variant="green" onClick={()=>approveGroup(groupItems)} disabled={approving}>
+                      ✓ APPROVE ALL
+                    </Btn>
+                  )}
+                </div>
                 {groupItems.map(tx => {
                   const s     = suggestions[tx.id];
                   const isSel = sel?.id === tx.id;
                   const color2= L1_COLORS[s?.l1] || "#888";
                   return (
-                    <div key={tx.id} onClick={()=>{setSel(tx);setEditSugg(null);setKeyword("");}}
+                    <div key={tx.id} onClick={()=>{setSel(tx);setEditSugg(null);setKeyword("");setKeywordOnly(false);}}
                       style={{ display:"flex", borderBottom:"1px solid var(--faint)", cursor:"pointer", background:isSel?"var(--accent-bg)":"transparent", transition:"background 0.12s" }}>
                       <div style={{ width:3, flexShrink:0, alignSelf:"stretch", background:isSel?color2:"transparent" }}/>
                       <div style={{ flex:1, padding:"10px 16px" }}>
@@ -318,9 +339,13 @@ export default function Review() {
                   <span style={{ fontSize:11, color:"var(--text)" }}>{selSugg.l2}</span>
                 </div>
                 <ConfBar value={selSugg.confidence}/>
-                {/* CR-007: business type */}
-                {selSugg.business_type && (
-                  <div style={{ fontSize:10, color:"var(--muted)", marginTop:6, fontStyle:"italic" }}>{selSugg.business_type}</div>
+                {/* CR-007: merchant info */}
+                {(selSugg.merchant_name || selSugg.place || selSugg.business_type) && (
+                  <div style={{ marginTop:8, padding:"6px 8px", background:"var(--faint)", borderRadius:4, fontSize:10, color:"var(--text2)", lineHeight:1.7 }}>
+                    {selSugg.merchant_name && <div><span style={{ color:"var(--muted)" }}>NAME </span>{selSugg.merchant_name}</div>}
+                    {selSugg.place        && <div><span style={{ color:"var(--muted)" }}>PLACE </span>{selSugg.place}</div>}
+                    {selSugg.business_type&& <div><span style={{ color:"var(--muted)" }}>TYPE </span>{selSugg.business_type}</div>}
+                  </div>
                 )}
                 {selSugg.reasoning && (
                   <div style={{ fontSize:10, color:"var(--muted)", marginTop:4, fontStyle:"italic" }}>{selSugg.reasoning}</div>
@@ -334,107 +359,109 @@ export default function Review() {
               </Btn>
             )}
 
-            {/* CR-014: L2-first selection — flat alphabetical L2 list, L1 auto-set */}
-            {/* L2 first */}
+            {/* L1/L2 — mutually filtered, both alphabetical */}
+            <div style={{ marginBottom:10 }}>
+              <div style={{ fontSize:10, color:"var(--muted)", marginBottom:5, letterSpacing:"0.08em" }}>L1 (CATEGORY)</div>
+              <select value={curL1} onChange={e=>setEditSugg({...(editSugg||selSugg||{}),l1:e.target.value,l2:""})}
+                style={{ width:"100%", background:"var(--faint)", border:"1px solid var(--border)", borderRadius:4, padding:"7px 10px", color:"var(--text)", fontFamily:"'DM Mono',monospace", fontSize:12 }}>
+                <option value="">Select category…</option>
+                {l1Options.map(l=><option key={l}>{l}</option>)}
+              </select>
+            </div>
             <div style={{ marginBottom:10 }}>
               <div style={{ fontSize:10, color:"var(--muted)", marginBottom:5, letterSpacing:"0.08em" }}>L2 (SUBCATEGORY)</div>
               <select
-                value={editSugg?.l2||selSugg?.l2||""}
+                value={curL1 ? curL2 : ""}
                 onChange={e => {
-                  const l2 = e.target.value;
-                  // Find which L1 contains this L2
-                  const l1 = Object.entries(tax).find(([,v]) => v.includes(l2))?.[0] || editSugg?.l1 || selSugg?.l1 || "";
-                  setEditSugg({...(editSugg||selSugg||{}), l1, l2});
+                  const val = e.target.value;
+                  if (curL1) {
+                    setEditSugg({...(editSugg||selSugg||{}), l1: curL1, l2: val});
+                  } else {
+                    const sep = val.indexOf("||");
+                    const l1 = val.slice(0, sep);
+                    const l2 = val.slice(sep + 2);
+                    setEditSugg({...(editSugg||selSugg||{}), l1, l2});
+                  }
                 }}
                 style={{ width:"100%", background:"var(--faint)", border:"1px solid var(--border)", borderRadius:4, padding:"7px 10px", color:"var(--text)", fontFamily:"'DM Mono',monospace", fontSize:12 }}>
                 <option value="">Select subcategory…</option>
-                {Object.entries(tax).sort(([a],[b])=>a.localeCompare(b)).flatMap(([l1,l2s]) =>
-                  [...l2s].sort().map(l2 => <option key={`${l1}/${l2}`} value={l2}>{l2} ({l1})</option>)
-                )}
+                {curL1
+                  ? (tax[curL1]||[]).slice().sort().map(l2 =>
+                      <option key={l2} value={l2}>{l2}</option>)
+                  : Object.entries(tax)
+                      .flatMap(([l1, l2s]) => l2s.map(l2 => ({ l1, l2 })))
+                      .sort((a, b) => a.l2.localeCompare(b.l2))
+                      .map(({l1, l2}) =>
+                        <option key={`${l1}||${l2}`} value={`${l1}||${l2}`}>{l2} ({l1})</option>)}
               </select>
             </div>
 
-            {/* L1 — shows auto-selected, can override */}
-            <div style={{ marginBottom:10 }}>
-              <div style={{ fontSize:10, color:"var(--muted)", marginBottom:5, letterSpacing:"0.08em" }}>L1 (CATEGORY)</div>
-              <select value={editSugg?.l1||selSugg?.l1||""} onChange={e=>setEditSugg({...(editSugg||selSugg||{}),l1:e.target.value,l2:""})}
-                style={{ width:"100%", background:"var(--faint)", border:"1px solid var(--border)", borderRadius:4, padding:"7px 10px", color:"var(--text)", fontFamily:"'DM Mono',monospace", fontSize:12 }}>
-                <option value="">Select category…</option>
-                {l1List.sort().map(l=><option key={l}>{l}</option>)}
-              </select>
-            </div>
-
-            {/* Keyword — auto-focused when merchant is Unknown (CR-010) */}
+            {/* Keyword */}
             <div style={{ marginBottom:16 }}>
-              <div style={{ fontSize:10, color:sel.merchant_clean==="Unknown"?"var(--orange)":"var(--muted)", marginBottom:5, letterSpacing:"0.08em" }}>
-                {sel.merchant_clean==="Unknown" ? "⚠ KEYWORD REQUIRED" : "KEYWORD FILTER (optional)"}
+              <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:5 }}>
+                <div style={{ fontSize:10, color:sel.merchant_clean==="Unknown"?"var(--orange)":"var(--muted)", letterSpacing:"0.08em" }}>
+                  {sel.merchant_clean==="Unknown" ? "⚠ KEYWORD REQUIRED" : "KEYWORD FILTER (optional)"}
+                </div>
+                <label style={{ display:"flex", alignItems:"center", gap:5, cursor:"pointer", fontSize:10, color: keywordOnly?"var(--accent)":"var(--muted)" }}>
+                  <input type="checkbox" checked={keywordOnly} onChange={e=>setKeywordOnly(e.target.checked)}
+                    style={{ accentColor:"var(--accent)", cursor:"pointer" }}/>
+                  KEYWORD ONLY RULE
+                </label>
               </div>
               <input
                 autoFocus={sel.merchant_clean==="Unknown"}
-                placeholder={sel.merchant_clean==="Unknown" ? "Enter keyword from booking text above…" : "Narrows rule scope…"}
-                style={{ width:"100%", background: sel.merchant_clean==="Unknown"?"var(--orange)08":"var(--faint)", border:`1px solid ${sel.merchant_clean==="Unknown"?"var(--orange)":"var(--border)"}`, borderRadius:4, padding:"7px 10px", color:"var(--text)", fontFamily:"'DM Mono',monospace", fontSize:12 }}
+                placeholder={keywordOnly ? "Keyword to match (no merchant)" : sel.merchant_clean==="Unknown" ? "Enter keyword from booking text above…" : "Narrows rule scope…"}
+                style={{ width:"100%", background: keywordOnly?"var(--accent)10":sel.merchant_clean==="Unknown"?"var(--orange)08":"var(--faint)", border:`1px solid ${keywordOnly?"var(--accent)":sel.merchant_clean==="Unknown"?"var(--orange)":"var(--border)"}`, borderRadius:4, padding:"7px 10px", color:"var(--text)", fontFamily:"'DM Mono',monospace", fontSize:12 }}
                 value={keyword} onChange={e=>setKeyword(e.target.value)}
               />
+              {keywordOnly && <div style={{ fontSize:9, color:"var(--accent)", marginTop:4 }}>Rule will match by keyword only — merchant name ignored</div>}
             </div>
 
+            {/* Mark as internal transfer */}
+            <Btn variant="ghost" style={{ width:"100%", marginBottom:8, color:"var(--orange)", border:"1px solid var(--orange)50" }}
+              disabled={approving}
+              onClick={async () => {
+                setApproving(true);
+                try {
+                  const pw = localStorage.getItem("budget_pw") || "";
+                  await fetch(`/api/transactions/${sel.id}`, {
+                    method:"PATCH",
+                    headers:{"Authorization":`Basic ${btoa(`admin:${pw}`)}`, "Content-Type":"application/json"},
+                    body: JSON.stringify({is_internal:1, l1:"Finance & Admin", l2:"Internal Transfer"})
+                  });
+                  await refreshList([sel.id]);
+                } finally { setApproving(false); }
+              }}>
+              ⇄ MARK AS INTERNAL TRANSFER
+            </Btn>
+
             <div style={{ display:"flex", gap:8 }}>
-              {/* CR-001: This transaction only */}
+              {/* CR-001: This transaction only — no rule saved */}
               <Btn variant="default" small
-                disabled={!(editSugg?.l1||selSugg?.l1)||!(editSugg?.l2||selSugg?.l2)||approving}
-                onClick={async()=>{
-                  const s = editSugg||selSugg;
-                  
-                  if (sel.merchant_clean==="Unknown"&&!keyword) { alert("Please enter a keyword for Unknown merchants"); return; }
-                  setApproving(true);
-                  try {
-                    await approveTransaction(sel.id, {l1:s.l1,l2:s.l2,keyword:keyword,apply_retrospective:false}); setKeyword("");
-                    removeSuggestionFromCache(sel.id);
-                    const remain=items.filter(t=>t.id!==sel.id);
-                    setItems(remain); setSel(remain[0]||null); setEditSugg(null);
-                  } finally { setApproving(false); }
+                disabled={!(editSugg?.l1||selSugg?.l1)||approving}
+                onClick={async () => {
+                  if ((sel.merchant_clean==="Unknown"||keywordOnly)&&!keyword) { alert("Please enter a keyword"); return; }
+                  await approveSingle(sel, false);
+                  setKeyword(""); setKeywordOnly(false);
                 }}>
                 THIS ONLY
               </Btn>
               <Btn variant="green" style={{ flex:1 }}
-                disabled={!(editSugg?.l1||selSugg?.l1)||!(editSugg?.l2||selSugg?.l2)||approving}
-                onClick={()=>{
-                  
-                  if(sel.merchant_clean==="Unknown"&&!keyword){alert("Please enter a keyword");return;}
-                  setShowRetro({type:"single",items:[sel],keyword:keyword});
+                disabled={!(editSugg?.l1||selSugg?.l1)||(keywordOnly&&!keyword)||approving}
+                onClick={async () => {
+                  if ((sel.merchant_clean==="Unknown"||keywordOnly)&&!keyword) { alert("Please enter a keyword"); return; }
+                  await approveSingle(sel, true);
+                  setKeyword(""); setKeywordOnly(false);
                 }}>
                 ✓ CONFIRM + SAVE RULE
               </Btn>
               <Btn variant="ghost" onClick={()=>{
                 removeSuggestionFromCache(sel.id);
-                setItems(i=>i.filter(x=>x.id!==sel.id));
-                setSel(items.find(x=>x.id!==sel.id)||null);
-                setEditSugg(null);
+                const remain = items.filter(x=>x.id!==sel.id);
+                setItems(remain); setSel(remain[0]||null); setEditSugg(null);
               }}>SKIP</Btn>
             </div>
           </Card>
-
-          {/* Retro prompt */}
-          {showRetro && (
-            <div style={{ background:"#fffbeb", border:"1px solid #fde68a", borderRadius:8, padding:16 }}>
-              <div style={{ fontSize:11, color:"#92400e", fontWeight:500, marginBottom:8 }}>
-                {showRetro.type==="group"
-                  ? `Apply to all ${showRetro.items.length} in "${showRetro.l1}"?`
-                  : "Apply rule to past transactions?"}
-              </div>
-              <div style={{ fontSize:11, color:"#78350f", marginBottom:12, lineHeight:1.5 }}>
-                Only unreviewed transactions will be updated.
-              </div>
-              <div style={{ display:"flex", gap:8 }}>
-                <Btn variant="primary" small onClick={()=>
-                  showRetro.type==="group" ? approveGroup(showRetro.items,true) : approveSingle(sel,true)
-                }>YES, APPLY TO ALL</Btn>
-                <Btn small onClick={()=>
-                  showRetro.type==="group" ? approveGroup(showRetro.items,false) : approveSingle(sel,false)
-                }>FUTURE ONLY</Btn>
-                <Btn variant="ghost" small onClick={()=>setShowRetro(null)}>CANCEL</Btn>
-              </div>
-            </div>
-          )}
         </div>
       )}
     </div>
